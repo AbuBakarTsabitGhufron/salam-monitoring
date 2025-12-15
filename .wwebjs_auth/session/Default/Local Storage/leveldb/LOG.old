@@ -1,0 +1,6 @@
+2025/12/12-10:11:49.725 2e03 Reusing MANIFEST /home/tsabith/Project/MonitorCleonSalam/.wwebjs_auth/session/Default/Local Storage/leveldb/MANIFEST-000001
+2025/12/12-10:11:49.726 2e03 Recovering log #10
+2025/12/12-10:11:49.726 2e03 Reusing old log /home/tsabith/Project/MonitorCleonSalam/.wwebjs_auth/session/Default/Local Storage/leveldb/000010.log 
+2025/12/12-11:22:01.070 3bf3 Level-0 table #14: started
+2025/12/12-11:22:01.077 3bf3 Level-0 table #14: 11862 bytes OK
+2025/12/12-11:22:01.081 3bf3 Delete type=0 #10

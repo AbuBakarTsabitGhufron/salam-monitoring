@@ -1,0 +1,6 @@
+# Ignore heavy runtime deps so pushes stay small
+node_modules/
+npm-debug.log*
+yarn-error.log*
+.wwebjs_cache/
+.wwebjs_auth/

@@ -241,7 +241,8 @@ async function checkAlerts(client) {
 			activeKeys.add(key);
 
 			const already = state.notified[user.router]?.[user.user];
-			if (already && already === user.offlineSince) continue;
+			// Jika sudah pernah dinotifikasi, lewati hingga user kembali online
+			if (already) continue;
 
 			newAlerts.push(user);
 		}

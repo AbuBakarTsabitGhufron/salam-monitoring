@@ -19,5 +19,6 @@
   "scheduleTimes": [
     "07:00",
     "15:00"
-  ]
+  ],
+  "notificationDelayMs": 30000
 }

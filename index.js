@@ -19,6 +19,7 @@ const DEFAULT_SCHEDULES = ["07:00", "15:00"]; // WIB, mudah diubah lewat /jadwal
 const DEFAULT_THRESHOLD = { minMinutes: 15, maxMinutes: 300 };
 const DEFAULT_TARGETS = ["120363406015508176@g.us"]; // Contoh grup WA
 const ADMIN_CHAT_IDS = ["6287715308060@c.us"]; // Isi dengan chat (grup/nomor) yang boleh pakai perintah admin
+const GROUPING_THRESHOLD = 10; // Minimum jumlah user dengan prefix sama untuk di-grup
 
 // === LOKASI FILE ===
 const STATE_FILE = path.join(__dirname, "state.json");
@@ -62,6 +63,7 @@ if (!state.scheduleTimes || !state.scheduleTimes.length) {
 let blacklist = ensureJson(BLACKLIST_FILE, { users: [] });
 let targets = ensureJson(TARGETS_FILE, { ids: DEFAULT_TARGETS });
 let scheduledJobs = []; // Cron jobs aktif untuk laporan terjadwal
+let lastGroupedAlerts = {}; // Menyimpan grouped alerts terakhir untuk command /detail
 
 // === HELPER WAKTU ===
 function formatDate(date = new Date()) {
@@ -141,6 +143,12 @@ async function sendToTargets(client, message) {
 }
 
 // === FORMAT PESAN ===
+function extractPrefix(username) {
+	// Ambil prefix sebelum tanda "-" (huruf besar)
+	const match = username.match(/^([A-Z]+)-/);
+	return match ? match[1] : null;
+}
+
 function buildOfflineMessage(entry) {
 	const since = entry.offlineSince
 		? formatDateTime(entry.offlineSince)
@@ -149,6 +157,23 @@ function buildOfflineMessage(entry) {
 	return (
 		`👤 User: ${entry.user}\n` +
 		`⏰ Down sejak: ${since}`
+	);
+}
+
+function buildGroupedOfflineMessage(prefix, entries) {
+	// Ambil waktu down terbaru
+	const latestTime = entries.reduce((latest, entry) => {
+		const time = new Date(entry.offlineSince);
+		return time > latest ? time : latest;
+	}, new Date(entries[0].offlineSince));
+
+	const router = toDisplayRouterName(entries[0].router);
+
+	return (
+		`💥 Link ${prefix} Down\n` +
+		`📟 Router: ${router}\n` +
+		`👥 Jumlah: ${entries.length} user\n` +
+		`⏰ Down sejak: ${formatDateTime(latestTime)}`
 	);
 }
 
@@ -210,7 +235,9 @@ async function checkAlerts(client) {
 	try {
 		const offlineUsers = await fetchOfflineAll();
 		const activeKeys = new Set();
+		const newAlerts = [];
 
+		// Kumpulkan alert baru
 		for (const user of offlineUsers) {
 			if (!ROUTERS.includes(user.router)) continue;
 			if (isBlacklisted(user.user)) continue;
@@ -225,9 +252,80 @@ async function checkAlerts(client) {
 			const already = state.notified[user.router]?.[user.user];
 			if (already && already === user.offlineSince) continue;
 
+			newAlerts.push(user);
+		}
+
+		// Kelompokkan berdasarkan prefix
+		const grouped = {};
+		const standalone = [];
+
+		for (const user of newAlerts) {
+			const prefix = extractPrefix(user.user);
+			
+			if (prefix) {
+				const groupKey = `${user.router}::${prefix}`;
+				if (!grouped[groupKey]) {
+					grouped[groupKey] = {
+						router: user.router,
+						prefix: prefix,
+						users: []
+					};
+				}
+				grouped[groupKey].users.push(user);
+			} else {
+				// User tanpa prefix (tidak ada format XXX-)
+				standalone.push(user);
+			}
+		}
+
+		// Kirim notifikasi
+		const messages = [];
+
+		// 1. Kirim grouped messages (10+ user dengan prefix sama)
+		for (const groupKey in grouped) {
+			const group = grouped[groupKey];
+			
+			if (group.users.length >= GROUPING_THRESHOLD) {
+				// Kirim sebagai grup
+				const message = buildGroupedOfflineMessage(group.prefix, group.users);
+				messages.push({ type: 'grouped', message, users: group.users });
+			} else {
+				// Kirim individual (kurang dari 10)
+				for (const user of group.users) {
+					const message = buildOfflineMessage(user);
+					messages.push({ type: 'individual', message, user });
+				}
+			}
+		}
+
+		// 2. Kirim standalone messages
+		for (const user of standalone) {
 			const message = buildOfflineMessage(user);
-			await sendToTargets(client, message);
-			upsertNotified(user.router, user.user, user.offlineSince);
+			messages.push({ type: 'individual', message, user });
+		}
+
+		// 3. Kirim semua message
+		for (const item of messages) {
+			await sendToTargets(client, item.message);
+			
+			// Update state
+			if (item.type === 'grouped') {
+				// Simpan untuk command /detail
+				const prefix = item.users[0] ? extractPrefix(item.users[0].user) : null;
+				if (prefix) {
+					lastGroupedAlerts[prefix] = item.users.map(u => ({
+						user: u.user,
+						router: u.router,
+						offlineSince: u.offlineSince
+					}));
+				}
+				
+				for (const user of item.users) {
+					upsertNotified(user.router, user.user, user.offlineSince);
+				}
+			} else {
+				upsertNotified(item.user.router, item.user.user, item.user.offlineSince);
+			}
 		}
 
 		removeClearedNotified(activeKeys);
@@ -296,7 +394,8 @@ function buildCmdMessage(includeAdmin) {
 	const umum =
 		"*Perintah Umum:*\n\n" +
 		"1. `/salam` - Menampilkan status router saat ini. Perintah ini membantu memantau kondisi router dan memastikan semuanya berjalan baik.\n" +
-		"2. `/cmd` - Menampilkan bantuan ini agar Anda memahami cara memakai perintah lain dan memecahkan masalah umum.";
+		"2. `/detail <prefix>` - Menampilkan daftar user yang down dari notifikasi Link XXX Down terakhir (contoh: `/detail BRN`).\n" +
+		"3. `/cmd` - Menampilkan bantuan ini agar Anda memahami cara memakai perintah lain dan memecahkan masalah umum.";
 
 	if (!includeAdmin) {
 		return umum;
@@ -353,6 +452,52 @@ async function handleCommands(client, msg) {
 			await msg.reply(buildReport(statuses));
 		} catch (err) {
 			await msg.reply("Gagal mengambil data monitoring.");
+		}
+		return true;
+	}
+
+	if (lower.startsWith("/detail")) {
+		if (!isAdminContext && !isTargetContext) return true;
+		
+		const parts = body.split(" ");
+		const prefix = parts[1]?.toUpperCase();
+		
+		if (!prefix) {
+			const availablePrefixes = Object.keys(lastGroupedAlerts);
+			if (availablePrefixes.length > 0) {
+				await msg.reply(
+					"Format: /detail <prefix>\n\n" +
+					"Prefix yang tersedia:\n" +
+					availablePrefixes.map(p => `- ${p}`).join("\n")
+				);
+			} else {
+				await msg.reply("Belum ada notifikasi Link Down yang di-grup. Format: /detail <prefix>");
+			}
+			return true;
+		}
+		
+		const users = lastGroupedAlerts[prefix] || [];
+		
+		if (users.length > 0) {
+			const router = toDisplayRouterName(users[0].router);
+			const text = 
+				`📋 *Detail Link ${prefix} Down*\n` +
+				`📟 Router: ${router}\n` +
+				`👥 Total: ${users.length} user\n\n` +
+				"Daftar user:\n" +
+				users.map((u, i) => `${i + 1}. ${u.user}`).join("\n");
+			await msg.reply(text);
+		} else {
+			const availablePrefixes = Object.keys(lastGroupedAlerts);
+			if (availablePrefixes.length > 0) {
+				await msg.reply(
+					`Tidak ada data untuk prefix "${prefix}".\n\n` +
+					"Prefix yang tersedia:\n" +
+					availablePrefixes.map(p => `- ${p}`).join("\n")
+				);
+			} else {
+				await msg.reply("Tidak ada data untuk prefix tersebut.");
+			}
 		}
 		return true;
 	}

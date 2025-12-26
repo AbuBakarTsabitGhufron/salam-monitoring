@@ -246,14 +246,13 @@ async function checkAlerts(client) {
 			newAlerts.push(user);
 		}
 
-		if (newAlerts.length >= 3) {
-			const groupedMessage = buildGroupedOfflineMessage(newAlerts);
-			await sendToTargets(client, groupedMessage, state.notificationDelayMs || DEFAULT_ALERT_DELAY_MS);
-		} else {
-			for (let i = 0; i < newAlerts.length; i++) {
-				if (i > 0) await delay(state.notificationDelayMs || DEFAULT_ALERT_DELAY_MS);
-				await sendToTargets(client, buildOfflineMessage(newAlerts[i]), state.notificationDelayMs || DEFAULT_ALERT_DELAY_MS);
-			}
+		for (let i = 0; i < newAlerts.length; i++) {
+			if (i > 0) await delay(state.notificationDelayMs || DEFAULT_ALERT_DELAY_MS);
+			await sendToTargets(
+				client,
+				buildOfflineMessage(newAlerts[i]),
+				state.notificationDelayMs || DEFAULT_ALERT_DELAY_MS
+			);
 		}
 
 		for (const entry of newAlerts) {

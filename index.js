@@ -14,7 +14,6 @@ const ROUTER_LABELS = {
 const STATUS_ENDPOINT = (router) => `https://api.wikolabs.biz.id/api/status/${router}`;
 const OFFLINE_ENDPOINT = "https://api.wikolabs.biz.id/api/offline/all";
 const CHECK_INTERVAL_MS = 30 * 1000; // Polling downtime
-const DEFAULT_ALERT_DELAY_MS = 30 * 1000; // Jeda antar notifikasi down
 const TZ = "Asia/Jakarta";
 const DEFAULT_SCHEDULES = ["07:00", "15:00"]; // WIB, mudah diubah lewat /jadwal
 const DEFAULT_THRESHOLD = { minMinutes: 15, maxMinutes: 300 };
@@ -50,7 +49,6 @@ let state = ensureJson(STATE_FILE, {
 	lastReports: {}, // { "07:00": "2025-12-11T07:00:00.000Z" }
 	threshold: DEFAULT_THRESHOLD,
 	scheduleTimes: DEFAULT_SCHEDULES,
-	notificationDelayMs: DEFAULT_ALERT_DELAY_MS,
 });
 
 if (!state.threshold) {
@@ -59,11 +57,6 @@ if (!state.threshold) {
 
 if (!state.scheduleTimes || !state.scheduleTimes.length) {
 	state.scheduleTimes = DEFAULT_SCHEDULES.slice();
-}
-
-if (!state.notificationDelayMs) {
-	state.notificationDelayMs = DEFAULT_ALERT_DELAY_MS;
-	saveJson(STATE_FILE, state);
 }
 
 let blacklist = ensureJson(BLACKLIST_FILE, { users: [] });
@@ -136,11 +129,11 @@ function removeClearedNotified(activeKeys) {
 	saveJson(STATE_FILE, state);
 }
 
-async function sendToTargets(client, message, perTargetDelayMs = 500) {
+async function sendToTargets(client, message) {
 	for (const id of targets.ids) {
 		try {
 			await client.sendMessage(id, message);
-			await delay(perTargetDelayMs);
+			await delay(500);
 		} catch (err) {
 			console.error(`Gagal kirim ke ${id}:`, err.message);
 		}
@@ -149,24 +142,14 @@ async function sendToTargets(client, message, perTargetDelayMs = 500) {
 
 // === FORMAT PESAN ===
 function buildOfflineMessage(entry) {
-    const since = entry.offlineSince
-        ? formatDateTime(entry.offlineSince)
-        : "(waktu tidak diketahui)";
+	const since = entry.offlineSince
+		? formatDateTime(entry.offlineSince)
+		: "(waktu tidak diketahui)";
 
-    return `💥 User: ${entry.user}\n⏰ Down sejak: ${since}`;
-}
-
-function buildGroupedOfflineMessage(entries) {
-    const lines = [];
-
-    for (const entry of entries) {
-        const since = entry.offlineSince ? formatDateTime(entry.offlineSince) : "(waktu tidak diketahui)";
-        lines.push(`💥 User: ${entry.user}`);
-        lines.push(`⏰ Down sejak: ${since}`);
-        lines.push(""); // separator antar user
-    }
-
-    return lines.join("\n").trim();
+	return (
+		`👤 User: ${entry.user}\n` +
+		`⏰ Down sejak: ${since}`
+	);
 }
 
 function buildReport(statuses) {
@@ -227,7 +210,6 @@ async function checkAlerts(client) {
 	try {
 		const offlineUsers = await fetchOfflineAll();
 		const activeKeys = new Set();
-		const newAlerts = [];
 
 		for (const user of offlineUsers) {
 			if (!ROUTERS.includes(user.router)) continue;
@@ -241,23 +223,11 @@ async function checkAlerts(client) {
 			activeKeys.add(key);
 
 			const already = state.notified[user.router]?.[user.user];
-			// Jika sudah pernah dinotifikasi, lewati hingga user kembali online
-			if (already) continue;
+			if (already && already === user.offlineSince) continue;
 
-			newAlerts.push(user);
-		}
-
-		for (let i = 0; i < newAlerts.length; i++) {
-			if (i > 0) await delay(state.notificationDelayMs || DEFAULT_ALERT_DELAY_MS);
-			await sendToTargets(
-				client,
-				buildOfflineMessage(newAlerts[i]),
-				state.notificationDelayMs || DEFAULT_ALERT_DELAY_MS
-			);
-		}
-
-		for (const entry of newAlerts) {
-			upsertNotified(entry.router, entry.user, entry.offlineSince);
+			const message = buildOfflineMessage(user);
+			await sendToTargets(client, message);
+			upsertNotified(user.router, user.user, user.offlineSince);
 		}
 
 		removeClearedNotified(activeKeys);
@@ -343,8 +313,7 @@ function buildCmdMessage(includeAdmin) {
 		" * `add [nama]`: Menambahkan nama ke blacklist.\n" +
 		" * `remove [nama]`: Menghapus nama dari blacklist.\n" +
 		" * `list`: Menampilkan daftar user yang diabaikan.\n" +
-		"4. `/jadwal [jam...]` - Mengatur jam laporan monitoring otomatis (contoh: `/jadwal 07:00 15:00`).\n" +
-		"5. `/delay [detik]` - Melihat atau mengubah jeda antar notifikasi down (detik).";
+		"4. `/jadwal [jam...]` - Mengatur jam laporan monitoring otomatis (contoh: `/jadwal 07:00 15:00`).";
 
 	return `${umum}\n\n${admin}`;
 }
@@ -477,30 +446,6 @@ async function handleCommands(client, msg) {
 		}
 
 		await msg.reply("Format: /blacklist <add|remove|list> [nama]");
-		return true;
-	}
-
-	if (lower.startsWith("/delay")) {
-		if (!isAdminContext) return true;
-
-		const parts = body.split(/\s+/);
-		const value = parts[1];
-
-		if (!value) {
-			const seconds = Math.round((state.notificationDelayMs || DEFAULT_ALERT_DELAY_MS) / 1000);
-			await msg.reply(`Delay notifikasi saat ini: ${seconds} detik`);
-			return true;
-		}
-
-		const seconds = Number(value);
-		if (!Number.isFinite(seconds) || seconds < 0 || seconds > 600) {
-			await msg.reply("Format: /delay <detik> (0-600)");
-			return true;
-		}
-
-		state.notificationDelayMs = seconds * 1000;
-		saveJson(STATE_FILE, state);
-		await msg.reply(`Delay notifikasi diset ke ${seconds} detik`);
 		return true;
 	}
 

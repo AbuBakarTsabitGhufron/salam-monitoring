@@ -70,8 +70,20 @@ if (targets.ids.length > 0 && typeof targets.ids[0] === 'string') {
 	saveJson(TARGETS_FILE, targets);
 }
 
+// Log targets yang ter-load
+console.log(`📋 Loaded ${targets.ids.length} target(s):`, targets.ids.map(t => `${t.id} (${t.type})`).join(", "));
+
 let scheduledJobs = []; // Cron jobs aktif untuk laporan terjadwal
 let lastGroupedAlerts = {}; // Menyimpan grouped alerts terakhir untuk command /detail
+let lastGroupedRecovery = {}; // Menyimpan grouped recovery (online) untuk command /detail
+const deviceToTargetCache = new Map(); // Cache mapping device ID ke target ID asli
+
+// === HELPER DEVICE ID ===
+function extractPhoneNumber(chatId) {
+	// Extract numeric part from chatId (support @c.us, @g.us, @lid formats)
+	const match = chatId.match(/^(\d+)@/);
+	return match ? match[1] : chatId;
+}
 
 // === HELPER WAKTU ===
 function formatDate(date = new Date()) {
@@ -171,7 +183,14 @@ async function sendToTargets(client, message, notificationType = 'all') {
 	
 	for (const id of targetIds) {
 		try {
-			await client.sendMessage(id, message);
+			const sentMsg = await client.sendMessage(id, message);
+			
+			// Simpan mapping: jika device ID berbeda dari target ID
+			if (sentMsg && sentMsg.to && sentMsg.to !== id) {
+				console.log(`📝 Device mapping: ${sentMsg.to} → ${id}`);
+				deviceToTargetCache.set(sentMsg.to, id);
+			}
+			
 			await delay(500);
 		} catch (err) {
 			console.error(`Gagal kirim ke ${id}:`, err.message);
@@ -211,6 +230,28 @@ function buildGroupedOfflineMessage(prefix, entries) {
 		`📟 Router: ${router}\n` +
 		`👥 Jumlah: ${entries.length} user\n` +
 		`⏰ Down sejak: ${formatDateTime(latestTime)}`
+	);
+}
+
+function buildGroupedOnlineMessage(prefix, entries, router) {
+	const now = formatDateTime(new Date());
+
+	return (
+		`✅ Link ${prefix} Online Kembali\n` +
+		`📟 Router: ${toDisplayRouterName(router)}\n` +
+		`👥 Jumlah: ${entries.length} user\n` +
+		`⏰ Online kembali: ${now}`
+	);
+}
+
+function buildOnlineMessage(user, router) {
+	const now = formatDateTime(new Date());
+
+	return (
+		`✅ User Online Kembali\n` +
+		// `📟 Router: ${toDisplayRouterName(router)}\n` +
+		`👤 User: ${user}\n` +
+		`⏰ Online kembali: ${now}`
 	);
 }
 
@@ -275,6 +316,7 @@ async function fetchStatuses() {
 		const responses = await Promise.all(
 			ROUTERS.map((router) => fetchWithRetry(STATUS_ENDPOINT(router)))
 		);
+		console.log(`✅ Berhasil mengambil status ${responses.length} router`);
 		return responses;
 	} catch (err) {
 		console.error("⚠️  Gagal mengambil status router:", err.message);
@@ -285,7 +327,9 @@ async function fetchStatuses() {
 async function fetchOfflineAll() {
 	try {
 		const data = await fetchWithRetry(OFFLINE_ENDPOINT);
-		return data?.users || [];
+		const users = data?.users || [];
+		console.log(`✅ Berhasil mengambil data offline: ${users.length} user`);
+		return users;
 	} catch (err) {
 		if (err.code === 'ECONNABORTED' || err.message?.includes('timeout')) {
 			console.error("⚠️  Timeout: API offline terlalu lama merespons (>30s)");
@@ -301,10 +345,12 @@ async function fetchOfflineAll() {
 // === LOGIKA ALERT ===
 async function checkAlerts(client) {
 	try {
+		console.log("🔍 Memulai pengecekan alert...");
 		const offlineUsers = await fetchOfflineAll();
 		
-		// Jika gagal fetch, skip cycle ini
+		// Jika gagal fetch, skip cycle ini tetapi cek recovery
 		if (!offlineUsers || offlineUsers.length === 0) {
+			await checkLinkRecovery(client, new Set());
 			return;
 		}
 		
@@ -404,9 +450,80 @@ async function checkAlerts(client) {
 			}
 		}
 
+		// Cek link yang online kembali sebelum cleanup
+		await checkLinkRecovery(client, activeKeys);
+		
 		removeClearedNotified(activeKeys);
+		console.log("✅ Pengecekan alert selesai\n");
 	} catch (err) {
 		console.error("Gagal cek alert:", err.message);
+	}
+}
+
+// === DETEKSI LINK ONLINE KEMBALI ===
+async function checkLinkRecovery(client, activeKeys) {
+	// Kelompokkan user yang sudah tidak offline berdasarkan prefix
+	const recoveredByPrefix = {};
+	const recoveredIndividual = [];
+	
+	for (const router of Object.keys(state.notified)) {
+		for (const user of Object.keys(state.notified[router])) {
+			const key = normalizeKey(router, user);
+			
+			// Jika tidak ada di activeKeys = sudah online kembali
+			if (!activeKeys.has(key)) {
+				const prefix = extractPrefix(user);
+				
+				if (prefix) {
+					const groupKey = `${router}::${prefix}`;
+					if (!recoveredByPrefix[groupKey]) {
+						recoveredByPrefix[groupKey] = {
+							router: router,
+							prefix: prefix,
+							users: []
+						};
+					}
+					recoveredByPrefix[groupKey].users.push({
+						user: user,
+						router: router
+					});
+				} else {
+					// User tanpa prefix
+					recoveredIndividual.push({ user, router });
+				}
+			}
+		}
+	}
+	
+	// Kirim notifikasi untuk link yang online kembali (≥10 user)
+	for (const groupKey in recoveredByPrefix) {
+		const group = recoveredByPrefix[groupKey];
+		
+		if (group.users.length >= GROUPING_THRESHOLD) {
+			// Kirim grouped notification
+			const message = buildGroupedOnlineMessage(group.prefix, group.users, group.router);
+			await sendToTargets(client, message, 'grouped');
+			console.log(`✅ Link ${group.prefix} online kembali (${group.users.length} user)`);
+			
+			// Simpan untuk command /detail up
+			lastGroupedRecovery[group.prefix] = group.users.map(u => ({
+				user: u.user,
+				router: u.router,
+				onlineSince: new Date().toISOString()
+			}));
+		} else {
+			// Kirim individual notification untuk setiap user
+			for (const u of group.users) {
+				const message = buildOnlineMessage(u.user, u.router);
+				await sendToTargets(client, message, 'individual');
+			}
+		}
+	}
+	
+	// Kirim notifikasi individual untuk user tanpa prefix
+	for (const u of recoveredIndividual) {
+		const message = buildOnlineMessage(u.user, u.router);
+		await sendToTargets(client, message, 'individual');
 	}
 }
 
@@ -476,7 +593,7 @@ function buildCmdMessage(includeAdmin) {
 	const umum =
 		"*Perintah Umum:*\n\n" +
 		"1. `/salam` - Menampilkan status router saat ini. Perintah ini membantu memantau kondisi router dan memastikan semuanya berjalan baik.\n" +
-		"2. `/detail <prefix>` - Menampilkan daftar user yang down dari notifikasi Link XXX Down terakhir (contoh: `/detail BRN`).\n" +
+		"2. `/detail <down|up> <prefix>` - Menampilkan daftar user yang down/online dari notifikasi Link XXX terakhir (contoh: `/detail down BRN` atau `/detail up PGK`).\n" +
 		"3. `/cmd` - Menampilkan bantuan ini agar Anda memahami cara memakai perintah lain dan memecahkan masalah umum.";
 
 	if (!includeAdmin) {
@@ -502,11 +619,51 @@ function buildCmdMessage(includeAdmin) {
 
 function isAdminChat(chatId) {
 	if (!ADMIN_CHAT_IDS.length) return true;
-	return ADMIN_CHAT_IDS.includes(chatId);
+	
+	// 1. Cek langsung dengan ID asli
+	if (ADMIN_CHAT_IDS.includes(chatId)) return true;
+	
+	// 2. Cek dengan ekstraksi nomor (support linked device)
+	const chatNumber = extractPhoneNumber(chatId);
+	return ADMIN_CHAT_IDS.some(adminId => {
+		const adminNumber = extractPhoneNumber(adminId);
+		return chatNumber === adminNumber;
+	});
 }
 
 function isTargetChat(chatId) {
-	return targets.ids.some(t => t.id === chatId);
+	// 1. Cek langsung dengan ID asli
+	const directMatch = targets.ids.some(t => t.id === chatId);
+	if (directMatch) {
+		console.log(`✅ isTargetChat(${chatId}): true (direct match)`);
+		return true;
+	}
+	
+	// 2. Cek dengan cache device ID
+	if (deviceToTargetCache.has(chatId)) {
+		console.log(`✅ isTargetChat(${chatId}): true (cached as ${deviceToTargetCache.get(chatId)})`);
+		return true;
+	}
+	
+	// 3. Cek dengan ekstraksi nomor (fallback untuk linked device)
+	const chatNumber = extractPhoneNumber(chatId);
+	const numberMatch = targets.ids.some(t => {
+		const targetNumber = extractPhoneNumber(t.id);
+		return chatNumber === targetNumber;
+	});
+	
+	if (numberMatch) {
+		console.log(`✅ isTargetChat(${chatId}): true (number match)`);
+		return true;
+	}
+	
+	// Debug jika tidak match
+	console.log(`🔍 isTargetChat(${chatId}): false`);
+	console.log(`   Extracted: ${chatNumber}`);
+	console.log(`   Target IDs: ${targets.ids.map(t => t.id).join(", ")}`);
+	console.log(`   Cached devices: ${Array.from(deviceToTargetCache.keys()).join(", ") || "none"}`);
+	
+	return false;
 }
 
 // === COMMAND HANDLER ===
@@ -519,8 +676,29 @@ async function handleCommands(client, msg) {
 	const isTargetContext = isTargetChat(chatId);
 	const lower = body.toLowerCase();
 
+	// Log semua command yang masuk
+	console.log(`\n📥 Command masuk: "${body}" dari ${chatId}`);
+	console.log(`   Admin: ${isAdminContext}, Target: ${isTargetContext}`);
+
+	// DEBUG: Command untuk cek ID dan akses
+	if (lower === "/debug") {
+		const info = 
+			`🔍 *Debug Info*\n\n` +
+			`Chat ID: ${chatId}\n` +
+			`Is Admin: ${isAdminContext}\n` +
+			`Is Target: ${isTargetContext}\n\n` +
+			`Admin IDs:\n${ADMIN_CHAT_IDS.join("\n")}\n\n` +
+			`Target IDs:\n${targets.ids.map(t => `${t.id} (${t.type})`).join("\n")}\n\n` +
+			`Pesan ini bisa dilihat siapa saja untuk debugging.`;
+		await msg.reply(info);
+		return true;
+	}
+
 	if (lower === "/cmd") {
+		console.log(`📝 Command /cmd dari ${chatId} - Admin: ${isAdminContext}, Target: ${isTargetContext}`);
+		
 		if (!isAdminContext && !isTargetContext) {
+			console.log(`❌ Akses ditolak untuk ${chatId}`);
 			return true;
 		}
 
@@ -529,7 +707,12 @@ async function handleCommands(client, msg) {
 	}
 
 	if (lower === "/salam") {
-		if (!isAdminContext && !isTargetContext) return true;
+		console.log(`📝 Command /salam dari ${chatId} - Admin: ${isAdminContext}, Target: ${isTargetContext}`);
+		
+		if (!isAdminContext && !isTargetContext) {
+			console.log(`❌ Akses ditolak untuk ${chatId}`);
+			return true;
+		}
 		try {
 			const statuses = await fetchStatuses();
 			await msg.reply(buildReport(statuses));
@@ -540,48 +723,106 @@ async function handleCommands(client, msg) {
 	}
 
 	if (lower.startsWith("/detail")) {
-		if (!isAdminContext && !isTargetContext) return true;
+		console.log(`📝 Command /detail dari ${chatId} - Admin: ${isAdminContext}, Target: ${isTargetContext}`);
+		
+		if (!isAdminContext && !isTargetContext) {
+			console.log(`❌ Akses ditolak untuk ${chatId}`);
+			return true;
+		}
 		
 		const parts = body.split(" ");
-		const prefix = parts[1]?.toUpperCase();
+		const statusOrPrefix = parts[1]?.toLowerCase();
+		const prefix = parts[2]?.toUpperCase();
 		
-		if (!prefix) {
-			const availablePrefixes = Object.keys(lastGroupedAlerts);
-			if (availablePrefixes.length > 0) {
-				await msg.reply(
-					"Format: /detail <prefix>\n\n" +
-					"Prefix yang tersedia:\n" +
-					availablePrefixes.map(p => `- ${p}`).join("\n")
-				);
+		// Jika tidak ada parameter atau hanya 1 parameter (backward compatible)
+		if (!statusOrPrefix) {
+			const availableDown = Object.keys(lastGroupedAlerts);
+			const availableUp = Object.keys(lastGroupedRecovery);
+			
+			if (availableDown.length > 0 || availableUp.length > 0) {
+				let text = "Format: /detail <down|up> <prefix>\n\n";
+				if (availableDown.length > 0) {
+					text += "Prefix Down tersedia:\n" + availableDown.map(p => `- ${p}`).join("\n") + "\n\n";
+				}
+				if (availableUp.length > 0) {
+					text += "Prefix Up tersedia:\n" + availableUp.map(p => `- ${p}`).join("\n");
+				}
+				await msg.reply(text.trim());
 			} else {
-				await msg.reply("Belum ada notifikasi Link Down yang di-grup. Format: /detail <prefix>");
+				await msg.reply("Belum ada notifikasi Link Down/Up yang di-grup. Format: /detail <down|up> <prefix>");
 			}
 			return true;
 		}
 		
-		const users = lastGroupedAlerts[prefix] || [];
-		
-		if (users.length > 0) {
-			const router = toDisplayRouterName(users[0].router);
-			const text = 
-				`📋 *Detail Link ${prefix} Down*\n` +
-				`📟 Router: ${router}\n` +
-				`👥 Total: ${users.length} user\n\n` +
-				"Daftar user:\n" +
-				users.map((u, i) => `${i + 1}. ${u.user}`).join("\n");
-			await msg.reply(text);
-		} else {
-			const availablePrefixes = Object.keys(lastGroupedAlerts);
-			if (availablePrefixes.length > 0) {
-				await msg.reply(
-					`Tidak ada data untuk prefix "${prefix}".\n\n` +
-					"Prefix yang tersedia:\n" +
-					availablePrefixes.map(p => `- ${p}`).join("\n")
-				);
-			} else {
-				await msg.reply("Tidak ada data untuk prefix tersebut.");
+		// Cek apakah format lama /detail <prefix> (backward compatible)
+		if (!prefix && statusOrPrefix) {
+			const oldPrefix = statusOrPrefix.toUpperCase();
+			const users = lastGroupedAlerts[oldPrefix] || [];
+			
+			if (users.length > 0) {
+				const router = toDisplayRouterName(users[0].router);
+				const text = 
+					`📋 *Detail Link ${oldPrefix} Down*\n` +
+					`📟 Router: ${router}\n` +
+					`👥 Total: ${users.length} user\n\n` +
+					"Daftar user:\n" +
+					users.map((u, i) => `${i + 1}. ${u.user}`).join("\n");
+				await msg.reply(text);
+				return true;
 			}
 		}
+		
+		// Format baru: /detail <down|up> <prefix>
+		if (statusOrPrefix === 'down' || statusOrPrefix === 'up') {
+			if (!prefix) {
+				const available = statusOrPrefix === 'down' 
+					? Object.keys(lastGroupedAlerts)
+					: Object.keys(lastGroupedRecovery);
+				
+				if (available.length > 0) {
+					await msg.reply(
+						`Format: /detail ${statusOrPrefix} <prefix>\n\n` +
+						`Prefix ${statusOrPrefix === 'down' ? 'Down' : 'Up'} tersedia:\n` +
+						available.map(p => `- ${p}`).join("\n")
+					);
+				} else {
+					await msg.reply(`Belum ada notifikasi Link ${statusOrPrefix === 'down' ? 'Down' : 'Up'} yang di-grup.`);
+				}
+				return true;
+			}
+			
+			const dataSource = statusOrPrefix === 'down' ? lastGroupedAlerts : lastGroupedRecovery;
+			const users = dataSource[prefix] || [];
+			
+			if (users.length > 0) {
+				const router = toDisplayRouterName(users[0].router);
+				const statusEmoji = statusOrPrefix === 'down' ? '💥' : '✅';
+				const statusText = statusOrPrefix === 'down' ? 'Down' : 'Online Kembali';
+				
+				const text = 
+					`📋 *Detail Link ${prefix} ${statusText}*\n` +
+					`📟 Router: ${router}\n` +
+					`👥 Total: ${users.length} user\n\n` +
+					"Daftar user:\n" +
+					users.map((u, i) => `${i + 1}. ${u.user}`).join("\n");
+				await msg.reply(text);
+			} else {
+				const available = Object.keys(dataSource);
+				if (available.length > 0) {
+					await msg.reply(
+						`Tidak ada data untuk prefix "${prefix}" yang ${statusOrPrefix === 'down' ? 'down' : 'online'}.\n\n` +
+						`Prefix ${statusOrPrefix === 'down' ? 'Down' : 'Up'} tersedia:\n` +
+						available.map(p => `- ${p}`).join("\n")
+					);
+				} else {
+					await msg.reply(`Tidak ada data link ${statusOrPrefix === 'down' ? 'down' : 'up'} untuk prefix tersebut.`);
+				}
+			}
+			return true;
+		}
+		
+		// Jika format tidak sesuai
+		await msg.reply("Format: /detail <down|up> <prefix>\n\nContoh:\n/detail down BRN\n/detail up PGK");
 		return true;
 	}
 
@@ -624,6 +865,15 @@ async function handleCommands(client, msg) {
 		if (action === "remove" && targetId) {
 			targets.ids = targets.ids.filter((t) => t.id !== targetId);
 			saveJson(TARGETS_FILE, targets);
+			
+			// Clear cache untuk device ID yang terkait dengan target ini
+			for (const [deviceId, mappedTargetId] of deviceToTargetCache.entries()) {
+				if (mappedTargetId === targetId) {
+					deviceToTargetCache.delete(deviceId);
+					console.log(`🗑️ Cleared cache mapping: ${deviceId} → ${mappedTargetId}`);
+				}
+			}
+			
 			await msg.reply(`Target dihapus: ${targetId}`);
 			return true;
 		}

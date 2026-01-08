@@ -17,9 +17,10 @@ const CHECK_INTERVAL_MS = 30 * 1000; // Polling downtime
 const TZ = "Asia/Jakarta";
 const DEFAULT_SCHEDULES = ["07:00", "15:00"]; // WIB, mudah diubah lewat /jadwal
 const DEFAULT_THRESHOLD = { minMinutes: 15, maxMinutes: 300 };
-const DEFAULT_TARGETS = ["120363406015508176@g.us"]; // Contoh grup WA
+const DEFAULT_TARGETS = [{ id: "120363406015508176@g.us", type: "all" }]; // Contoh grup WA
 const ADMIN_CHAT_IDS = ["6287715308060@c.us"]; // Isi dengan chat (grup/nomor) yang boleh pakai perintah admin
 const GROUPING_THRESHOLD = 10; // Minimum jumlah user dengan prefix sama untuk di-grup
+const SESSION_NAME = "salam-monitoring-bot"; // Nama session untuk WhatsApp Web (akan muncul saat scan QR)
 
 // === LOKASI FILE ===
 const STATE_FILE = path.join(__dirname, "state.json");
@@ -62,6 +63,13 @@ if (!state.scheduleTimes || !state.scheduleTimes.length) {
 
 let blacklist = ensureJson(BLACKLIST_FILE, { users: [] });
 let targets = ensureJson(TARGETS_FILE, { ids: DEFAULT_TARGETS });
+
+// Migrasi format lama ke format baru
+if (targets.ids.length > 0 && typeof targets.ids[0] === 'string') {
+	targets.ids = targets.ids.map(id => ({ id, type: 'all' }));
+	saveJson(TARGETS_FILE, targets);
+}
+
 let scheduledJobs = []; // Cron jobs aktif untuk laporan terjadwal
 let lastGroupedAlerts = {}; // Menyimpan grouped alerts terakhir untuk command /detail
 
@@ -131,8 +139,37 @@ function removeClearedNotified(activeKeys) {
 	saveJson(STATE_FILE, state);
 }
 
-async function sendToTargets(client, message) {
-	for (const id of targets.ids) {
+function getTargetsByType(type) {
+	// type: 'all' (semua notifikasi), 'link' (hanya grouped link down), 'report' (laporan terjadwal)
+	if (type === 'all') {
+		return targets.ids.filter(t => t.type === 'all').map(t => t.id);
+	} else if (type === 'link') {
+		// Target 'link' hanya menerima grouped link down
+		// Target 'all' menerima semua termasuk link down
+		return targets.ids.filter(t => t.type === 'all' || t.type === 'link').map(t => t.id);
+	} else if (type === 'report') {
+		// Laporan terjadwal hanya ke target 'all'
+		return targets.ids.filter(t => t.type === 'all').map(t => t.id);
+	}
+	return [];
+}
+
+async function sendToTargets(client, message, notificationType = 'all') {
+	// notificationType: 'individual' (user down individual), 'grouped' (link down), 'report' (laporan)
+	let targetIds = [];
+	
+	if (notificationType === 'grouped') {
+		// Grouped link down: kirim ke target 'all' dan 'link'
+		targetIds = getTargetsByType('link');
+	} else if (notificationType === 'report') {
+		// Laporan terjadwal: hanya ke target 'all'
+		targetIds = getTargetsByType('report');
+	} else {
+		// Individual user down: hanya ke target 'all'
+		targetIds = getTargetsByType('all');
+	}
+	
+	for (const id of targetIds) {
 		try {
 			await client.sendMessage(id, message);
 			await delay(500);
@@ -218,22 +255,59 @@ function buildReport(statuses) {
 }
 
 // === PENGAMBILAN DATA ===
+async function fetchWithRetry(url, retries = 3, timeout = 30000) {
+	for (let i = 0; i < retries; i++) {
+		try {
+			const res = await axios.get(url, { timeout });
+			return res.data;
+		} catch (err) {
+			if (i === retries - 1) throw err;
+			const isTimeout = err.code === 'ECONNABORTED' || err.message?.includes('timeout');
+			const errorMsg = isTimeout ? 'timeout' : err.message;
+			console.log(`⚠️  Retry ${i + 1}/${retries} untuk ${url.split('/').pop()} (${errorMsg})`);
+			await delay(2000); // Tunggu 2 detik sebelum retry
+		}
+	}
+}
+
 async function fetchStatuses() {
-	const responses = await Promise.all(
-		ROUTERS.map((router) => axios.get(STATUS_ENDPOINT(router), { timeout: 10000 }))
-	);
-	return responses.map((r) => r.data);
+	try {
+		const responses = await Promise.all(
+			ROUTERS.map((router) => fetchWithRetry(STATUS_ENDPOINT(router)))
+		);
+		return responses;
+	} catch (err) {
+		console.error("⚠️  Gagal mengambil status router:", err.message);
+		return [];
+	}
 }
 
 async function fetchOfflineAll() {
-	const res = await axios.get(OFFLINE_ENDPOINT, { timeout: 10000 });
-	return res.data?.users || [];
+	try {
+		const data = await fetchWithRetry(OFFLINE_ENDPOINT);
+		return data?.users || [];
+	} catch (err) {
+		if (err.code === 'ECONNABORTED' || err.message?.includes('timeout')) {
+			console.error("⚠️  Timeout: API offline terlalu lama merespons (>30s)");
+		} else if (err.code === 'ENOTFOUND' || err.code === 'ECONNREFUSED') {
+			console.error("⚠️  Tidak dapat terhubung ke API offline");
+		} else {
+			console.error("⚠️  Gagal mengambil data offline:", err.message);
+		}
+		return [];
+	}
 }
 
 // === LOGIKA ALERT ===
 async function checkAlerts(client) {
 	try {
 		const offlineUsers = await fetchOfflineAll();
+		
+		// Jika gagal fetch, skip cycle ini
+		if (!offlineUsers || offlineUsers.length === 0) {
+			return;
+		}
+		
 		const activeKeys = new Set();
 		const newAlerts = [];
 
@@ -306,7 +380,9 @@ async function checkAlerts(client) {
 
 		// 3. Kirim semua message
 		for (const item of messages) {
-			await sendToTargets(client, item.message);
+			// Tentukan tipe notifikasi untuk routing
+			const notificationType = item.type === 'grouped' ? 'grouped' : 'individual';
+			await sendToTargets(client, item.message, notificationType);
 			
 			// Update state
 			if (item.type === 'grouped') {
@@ -378,8 +454,14 @@ function scheduleReportJobs(client) {
 async function runScheduledReport(client, timeLabel) {
 	try {
 		const statuses = await fetchStatuses();
+		
+		if (!statuses || statuses.length === 0) {
+			console.error(`⚠️  Gagal mengambil data untuk laporan ${timeLabel}, skip laporan ini.`);
+			return;
+		}
+		
 		const message = buildReport(statuses);
-		await sendToTargets(client, message);
+		await sendToTargets(client, message, 'report');
 
 		state.lastReports[timeLabel] = new Date().toISOString();
 		saveJson(STATE_FILE, state);
@@ -403,10 +485,11 @@ function buildCmdMessage(includeAdmin) {
 
 	const admin =
 		"*Perintah Admin:*\n\n" +
-		"1. `/targets <add|remove|list> [id]` - Mengelola target pada sistem dengan opsi:\n" +
-		" * `add [id]`: Menambahkan target baru dengan ID tertentu.\n" +
+		"1. `/targets <add|remove|list> [id] [all|link]` - Mengelola target pada sistem dengan opsi:\n" +
+		" * `add [id] all`: Menambahkan target yang menerima semua notifikasi (default).\n" +
+		" * `add [id] link`: Menambahkan target yang hanya menerima notifikasi link down (≥10 user).\n" +
 		" * `remove [id]`: Menghapus target dengan ID tersebut.\n" +
-		" * `list`: Menampilkan daftar target aktif.\n" +
+		" * `list`: Menampilkan daftar target aktif beserta tipenya.\n" +
 		"2. `/threshold <min> <max>` - Menyetel batas waktu minimum dan maksimum downtime yang akan dipantau.\n" +
 		"3. `/blacklist <add|remove|list> [nama]` - Mengelola daftar user yang diabaikan dengan opsi:\n" +
 		" * `add [nama]`: Menambahkan nama ke blacklist.\n" +
@@ -423,7 +506,7 @@ function isAdminChat(chatId) {
 }
 
 function isTargetChat(chatId) {
-	return targets.ids.includes(chatId);
+	return targets.ids.some(t => t.id === chatId);
 }
 
 // === COMMAND HANDLER ===
@@ -507,35 +590,45 @@ async function handleCommands(client, msg) {
 
 		const parts = body.split(" ");
 		const action = parts[1];
-		const value = parts.slice(2).join(" ");
+		const targetId = parts[2];
+		const targetType = parts[3]?.toLowerCase();
 
 		if (action === "list" || !action) {
-			const text = targets.ids.length
-				? "Target saat ini:\n" + targets.ids.map((id, i) => `${i + 1}. ${id}`).join("\n")
-				: "Belum ada target.";
-			await msg.reply(text);
+			if (targets.ids.length) {
+				const text = "Target saat ini:\n" + targets.ids.map((t, i) => {
+					const typeLabel = t.type === 'all' ? '(semua notifikasi)' : '(hanya link down)';
+					return `${i + 1}. ${t.id} ${typeLabel}`;
+				}).join("\n");
+				await msg.reply(text);
+			} else {
+				await msg.reply("Belum ada target.");
+			}
 			return true;
 		}
 
-		if (action === "add" && value) {
-			if (!targets.ids.includes(value)) {
-				targets.ids.push(value);
+		if (action === "add" && targetId) {
+			const type = (targetType === 'link' || targetType === 'all') ? targetType : 'all';
+			const exists = targets.ids.find(t => t.id === targetId);
+			
+			if (!exists) {
+				targets.ids.push({ id: targetId, type });
 				saveJson(TARGETS_FILE, targets);
-				await msg.reply(`Target ditambahkan: ${value}`);
+				const typeLabel = type === 'all' ? 'semua notifikasi' : 'hanya link down';
+				await msg.reply(`Target ditambahkan: ${targetId} (${typeLabel})`);
 			} else {
 				await msg.reply("Target sudah ada.");
 			}
 			return true;
 		}
 
-		if (action === "remove" && value) {
-			targets.ids = targets.ids.filter((id) => id !== value);
+		if (action === "remove" && targetId) {
+			targets.ids = targets.ids.filter((t) => t.id !== targetId);
 			saveJson(TARGETS_FILE, targets);
-			await msg.reply(`Target dihapus: ${value}`);
+			await msg.reply(`Target dihapus: ${targetId}`);
 			return true;
 		}
 
-		await msg.reply("Format: /targets <add|remove|list> [id]");
+		await msg.reply("Format: /targets <add|remove|list> [id] [all|link]\n\nContoh:\n/targets add 6287715308060@c.us all\n/targets add 6287715308060@c.us link");
 		return true;
 	}
 
@@ -634,7 +727,7 @@ function startLoops(client) {
 console.log("🚀 Memulai bot WhatsApp Salam...");
 
 const client = new Client({
-	authStrategy: new LocalAuth(),
+	authStrategy: new LocalAuth({ clientId: SESSION_NAME }),
 	puppeteer: {
 		headless: true,
 		args: ["--no-sandbox", "--disable-setuid-sandbox"],

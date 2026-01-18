@@ -19,7 +19,7 @@ npm install
 node index.js
 ```
 - Saat pertama kali jalan, scan QR yang muncul di terminal.
-- Sesi tersimpan di `.wwebjs_auth/` dan cache di `.wwebjs_cache/`.
+- Sesi tersimpan di folder `${SESSION_NAME}_auth/` (Baileys multi-file auth).
 
 ### Jalankan sebagai service (contoh systemd)
 Buat unit `/etc/systemd/system/salam-monitor.service`:
@@ -223,12 +223,12 @@ Bot mendukung kategorisasi target untuk memfilter jenis notifikasi yang diterima
 
 ## Struktur Repo
 - `index.js` — Logika utama bot, scheduler, handler perintah, notifikasi down/online, dan grouping.
-- `package.json` — Dependensi: `whatsapp-web.js`, `axios`, `node-cron`, `qrcode-terminal`.
+- `package.json` — Dependensi: `@whiskeysockets/baileys`, `axios`, `node-cron`, `qrcode-terminal`, `pino`.
 - `state.json` — Status runtime: terakhir notif per user, jadwal, threshold.
 - `blacklist.json` — Daftar user yang diabaikan.
 - `targets.json` — Daftar ID chat/grup tujuan dengan tipe kategorisasi.
 - `cek_id.js` — Skrip helper (lihat file untuk detail jika dibutuhkan).
-- `.wwebjs_auth/`, `.wwebjs_cache/` — Sesi/cache WhatsApp Web (jangan dipush).
+- `${SESSION_NAME}_auth/` — Session Baileys multi-file auth (jangan dipush).
 - `.gitignore` — Mengecualikan `node_modules/`, log, dan cache sesi.
 
 ## Fitur Teknis
@@ -240,32 +240,28 @@ Bot mendukung kategorisasi target untuk memfilter jenis notifikasi yang diterima
 - Bot tetap berjalan meskipun API down sementara
 
 ### Custom Session Name
-- Session WhatsApp Web menggunakan nama custom: `salam-monitoring-bot`
-- Nama akan muncul di WhatsApp Web → Devices → Linked devices
+- Folder auth Baileys menggunakan nama: `salam-monitoring-bot_auth`
 - Bisa diubah di konstanta `SESSION_NAME` di `index.js`
 
-### Device ID Mapping & Authentication
-Bot mendukung autentikasi untuk **linked devices** (WhatsApp Desktop, Web, dll) dengan sistem mapping otomatis:
+### Device ID Normalization & Authentication
+Baileys menggunakan format JID `@s.whatsapp.net`, sedangkan konfigurasi memakai `@c.us`. Bot menormalisasi keduanya agar command tetap konsisten.
 
 **Cara Kerja:**
-1. **Auto-mapping saat kirim pesan**: Bot otomatis menyimpan mapping device ID saat mengirim notifikasi ke target
-   - Contoh: Kirim ke `6285723060629@c.us` → WhatsApp route ke device `92913614725156@lid`
-   - Mapping disimpan di cache: `92913614725156@lid → 6285723060629@c.us`
-
-2. **Three-tier authentication** untuk command:
-   - ✅ Direct ID match (cek langsung dengan ID di targets/admin)
-   - ✅ Cache lookup (cek mapping device ID)
-   - ✅ Number extraction fallback (bandingkan nomor telepon)
-
-3. **Cache cleanup otomatis**: Saat target dihapus dengan `/targets remove`, mapping device-nya juga otomatis terhapus
+1. **Normalisasi ID**: `@c.us` otomatis diubah ke `@s.whatsapp.net` saat kirim/cek akses.
+2. **Cache mapping saat kirim pesan**: Bot menyimpan mapping ID hasil normalisasi ke ID asli di `targets.json`.
+3. **Three-tier authentication** untuk command:
+  - ✅ Direct ID match (cek langsung dengan ID di targets/admin setelah normalisasi)
+  - ✅ Cache lookup (cek mapping ID normalisasi)
+  - ✅ Number extraction fallback (bandingkan nomor telepon)
+4. **Cache cleanup otomatis**: Saat target dihapus dengan `/targets remove`, mapping terkait ikut dihapus.
 
 **Keuntungan:**
-- Target bisa menggunakan command dari device manapun (HP, Desktop, Web) setelah menerima notifikasi pertama
-- Admin tidak perlu manual mapping device ID
-- Security tetap terjaga karena hanya device yang pernah menerima pesan bot yang ter-map
+- Target tetap bisa memakai `@c.us` seperti sebelumnya
+- Autentikasi tetap stabil meski format JID berbeda
+- Security tetap terjaga karena hanya ID di `targets.json` yang diizinkan
 
 **Debug Command:**
-- `/debug` — Tampilkan Chat ID, status admin, status target, dan cache device mapping (tersedia untuk semua user)
+- `/debug` — Tampilkan Chat ID, status admin, status target, dan cache mapping (tersedia untuk semua user)
 
 ### Logging
 Bot menampilkan log informatif untuk monitoring:
@@ -273,8 +269,8 @@ Bot menampilkan log informatif untuk monitoring:
 🔍 Memulai pengecekan alert...
 ✅ Berhasil mengambil data offline: 23 user
 ✅ Link BRN online kembali (12 user)
-📝 Device mapping: 92913614725156@lid → 6285723060629@c.us
-🗑️ Cleared cache mapping: 92913614725156@lid → 6285135911726@c.us
+📝 Device mapping: 6285723060629@s.whatsapp.net → 6285723060629@c.us
+🗑️ Cleared cache mapping: 6285135911726@s.whatsapp.net → 6285135911726@c.us
 ✅ Pengecekan alert selesai
 ```
 

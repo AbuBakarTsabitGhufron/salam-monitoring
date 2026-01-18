@@ -8,3 +8,4 @@ node_modules/
 .env.*
 dist/
 build/
+salam-monitoring-bot_auth

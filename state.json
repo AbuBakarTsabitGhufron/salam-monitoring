@@ -1,14 +1,7 @@
 {
   "notified": {
     "SALAM-UTAMA-INDI": {
-      "NBS-Rohadi": "2026-01-08T03:33:00.106Z"
-    },
-    "SALAM-UTAMA-METRO": {
-      "SLM-Budi Nurwanta": "2026-01-08T02:19:30.237Z",
-      "SLM-Ika Setiyawati": "2026-01-08T02:19:30.237Z",
-      "WDK-Eko Haryanto": "2026-01-08T05:27:30.303Z",
-      "SLM-Arip": "2026-01-08T06:06:30.346Z",
-      "WDK-Didik": "2026-01-08T06:06:30.346Z"
+      "PGK-Supanggih": "2026-01-18T12:08:40.247Z"
     }
   },
   "lastReports": {
@@ -17,7 +10,7 @@
     "10:38": "2025-12-12T03:38:02.675Z"
   },
   "threshold": {
-    "minMinutes": 3,
+    "minMinutes": 13,
     "maxMinutes": 300
   },
   "scheduleTimes": [

@@ -1,4 +1,10 @@
-const { Client, LocalAuth } = require("whatsapp-web.js");
+const {
+	default: makeWASocket,
+	fetchLatestBaileysVersion,
+	DisconnectReason,
+	useMultiFileAuthState,
+} = require("@whiskeysockets/baileys");
+const pino = require("pino");
 const qrcode = require("qrcode-terminal");
 const axios = require("axios");
 const cron = require("node-cron");
@@ -20,7 +26,8 @@ const DEFAULT_THRESHOLD = { minMinutes: 15, maxMinutes: 300 };
 const DEFAULT_TARGETS = [{ id: "120363406015508176@g.us", type: "all" }]; // Contoh grup WA
 const ADMIN_CHAT_IDS = ["6287715308060@c.us"]; // Isi dengan chat (grup/nomor) yang boleh pakai perintah admin
 const GROUPING_THRESHOLD = 10; // Minimum jumlah user dengan prefix sama untuk di-grup
-const SESSION_NAME = "salam-monitoring-bot"; // Nama session untuk WhatsApp Web (akan muncul saat scan QR)
+const SESSION_NAME = "salam-monitoring-bot"; // Nama folder session Baileys
+const AUTH_DIR = path.join(__dirname, `${SESSION_NAME}_auth`); // Folder auth Baileys
 
 // === LOKASI FILE ===
 const STATE_FILE = path.join(__dirname, "state.json");
@@ -74,6 +81,7 @@ if (targets.ids.length > 0 && typeof targets.ids[0] === 'string') {
 console.log(`📋 Loaded ${targets.ids.length} target(s):`, targets.ids.map(t => `${t.id} (${t.type})`).join(", "));
 
 let scheduledJobs = []; // Cron jobs aktif untuk laporan terjadwal
+let alertInterval = null; // Interval aktif untuk pengecekan alert
 let lastGroupedAlerts = {}; // Menyimpan grouped alerts terakhir untuk command /detail
 let lastGroupedRecovery = {}; // Menyimpan grouped recovery (online) untuk command /detail
 const deviceToTargetCache = new Map(); // Cache mapping device ID ke target ID asli
@@ -83,6 +91,34 @@ function extractPhoneNumber(chatId) {
 	// Extract numeric part from chatId (support @c.us, @g.us, @lid formats)
 	const match = chatId.match(/^(\d+)@/);
 	return match ? match[1] : chatId;
+}
+
+function normalizeChatId(chatId) {
+	if (!chatId) return chatId;
+	if (chatId.endsWith("@c.us")) return chatId.replace("@c.us", "@s.whatsapp.net");
+	return chatId;
+}
+
+function toBaileysId(chatId) {
+	return normalizeChatId(chatId);
+}
+
+function unwrapMessage(message) {
+	if (!message) return message;
+	if (message.ephemeralMessage?.message) return message.ephemeralMessage.message;
+	if (message.viewOnceMessage?.message) return message.viewOnceMessage.message;
+	return message;
+}
+
+function getMessageText(message) {
+	const unwrapped = unwrapMessage(message);
+	return (
+		unwrapped?.conversation ||
+		unwrapped?.extendedTextMessage?.text ||
+		unwrapped?.imageMessage?.caption ||
+		unwrapped?.videoMessage?.caption ||
+		""
+	);
 }
 
 // === HELPER WAKTU ===
@@ -183,12 +219,13 @@ async function sendToTargets(client, message, notificationType = 'all') {
 	
 	for (const id of targetIds) {
 		try {
-			const sentMsg = await client.sendMessage(id, message);
+			const sendId = toBaileysId(id);
+			const sentMsg = await client.sendMessage(sendId, { text: message });
 			
-			// Simpan mapping: jika device ID berbeda dari target ID
-			if (sentMsg && sentMsg.to && sentMsg.to !== id) {
-				console.log(`📝 Device mapping: ${sentMsg.to} → ${id}`);
-				deviceToTargetCache.set(sentMsg.to, id);
+			// Simpan mapping: jika ID berubah setelah normalisasi
+			if (sendId !== id) {
+				console.log(`📝 Device mapping: ${sendId} → ${id}`);
+				deviceToTargetCache.set(sendId, id);
 			}
 			
 			await delay(500);
@@ -196,6 +233,12 @@ async function sendToTargets(client, message, notificationType = 'all') {
 			console.error(`Gagal kirim ke ${id}:`, err.message);
 		}
 	}
+}
+
+async function sendText(client, chatId, text, quotedMessage) {
+	const sendId = toBaileysId(chatId);
+	const options = quotedMessage ? { quoted: quotedMessage } : undefined;
+	return client.sendMessage(sendId, { text }, options);
 }
 
 // === FORMAT PESAN ===
@@ -621,34 +664,37 @@ function isAdminChat(chatId) {
 	if (!ADMIN_CHAT_IDS.length) return true;
 	
 	// 1. Cek langsung dengan ID asli
-	if (ADMIN_CHAT_IDS.includes(chatId)) return true;
+	const normalizedChatId = normalizeChatId(chatId);
+	const directMatch = ADMIN_CHAT_IDS.some((id) => normalizeChatId(id) === normalizedChatId);
+	if (directMatch) return true;
 	
 	// 2. Cek dengan ekstraksi nomor (support linked device)
-	const chatNumber = extractPhoneNumber(chatId);
+	const chatNumber = extractPhoneNumber(normalizedChatId);
 	return ADMIN_CHAT_IDS.some(adminId => {
-		const adminNumber = extractPhoneNumber(adminId);
+		const adminNumber = extractPhoneNumber(normalizeChatId(adminId));
 		return chatNumber === adminNumber;
 	});
 }
 
 function isTargetChat(chatId) {
 	// 1. Cek langsung dengan ID asli
-	const directMatch = targets.ids.some(t => t.id === chatId);
+	const normalizedChatId = normalizeChatId(chatId);
+	const directMatch = targets.ids.some(t => normalizeChatId(t.id) === normalizedChatId);
 	if (directMatch) {
 		console.log(`✅ isTargetChat(${chatId}): true (direct match)`);
 		return true;
 	}
 	
 	// 2. Cek dengan cache device ID
-	if (deviceToTargetCache.has(chatId)) {
-		console.log(`✅ isTargetChat(${chatId}): true (cached as ${deviceToTargetCache.get(chatId)})`);
+	if (deviceToTargetCache.has(normalizedChatId)) {
+		console.log(`✅ isTargetChat(${chatId}): true (cached as ${deviceToTargetCache.get(normalizedChatId)})`);
 		return true;
 	}
 	
 	// 3. Cek dengan ekstraksi nomor (fallback untuk linked device)
-	const chatNumber = extractPhoneNumber(chatId);
+	const chatNumber = extractPhoneNumber(normalizedChatId);
 	const numberMatch = targets.ids.some(t => {
-		const targetNumber = extractPhoneNumber(t.id);
+		const targetNumber = extractPhoneNumber(normalizeChatId(t.id));
 		return chatNumber === targetNumber;
 	});
 	
@@ -969,42 +1015,79 @@ async function handleCommands(client, msg) {
 // === LOOP UTAMA ===
 function startLoops(client) {
 	checkAlerts(client);
-	setInterval(() => checkAlerts(client), CHECK_INTERVAL_MS);
+	if (alertInterval) clearInterval(alertInterval);
+	alertInterval = setInterval(() => checkAlerts(client), CHECK_INTERVAL_MS);
 	scheduleReportJobs(client);
 }
 
 // === INISIALISASI BOT ===
 console.log("🚀 Memulai bot WhatsApp Salam...");
 
-const client = new Client({
-	authStrategy: new LocalAuth({ clientId: SESSION_NAME }),
-	puppeteer: {
-		headless: true,
-		args: ["--no-sandbox", "--disable-setuid-sandbox"],
-	},
-});
+async function startSock() {
+	const { state: authState, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+	const { version } = await fetchLatestBaileysVersion();
 
-client.on("qr", (qr) => {
-	console.clear();
-	console.log("📱 Scan QR berikut:");
-	qrcode.generate(qr, { small: true });
-});
+	const sock = makeWASocket({
+		version,
+		auth: authState,
+		logger: pino({ level: "silent" }),
+		browser: ["Salam Monitoring Bot", "Chrome", "1.0.0"],
+		printQRInTerminal: false,
+	});
 
-client.on("ready", () => {
-	console.log("✅ Bot siap. Memulai monitoring...");
-	startLoops(client);
-});
+	sock.ev.on("creds.update", saveCreds);
 
-client.on("message", async (msg) => {
-	await handleCommands(client, msg);
-});
+	sock.ev.on("connection.update", (update) => {
+		const { connection, lastDisconnect, qr } = update;
 
-client.on("disconnected", (reason) => {
-	console.log("❌ WhatsApp terputus:", reason);
-});
+		if (qr) {
+			console.clear();
+			console.log("📱 Scan QR berikut:");
+			qrcode.generate(qr, { small: true });
+		}
 
-client.on("auth_failure", (msg) => {
-	console.error("❌ Autentikasi gagal:", msg);
-});
+		if (connection === "open") {
+			console.log("✅ Bot siap. Memulai monitoring...");
+			startLoops(sock);
+		}
 
-client.initialize();
+		if (connection === "close") {
+			const statusCode = lastDisconnect?.error?.output?.statusCode;
+			const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+			console.log("❌ WhatsApp terputus:", lastDisconnect?.error?.message || "unknown");
+			if (shouldReconnect) {
+				setTimeout(() => {
+					startSock();
+				}, 5000);
+			} else {
+				console.log("⚠️  Logged out. Hapus folder auth dan scan QR ulang.");
+			}
+		}
+	});
+
+	sock.ev.on("messages.upsert", async (event) => {
+		if (event.type !== "notify") return;
+
+		for (const msg of event.messages) {
+			if (!msg.message) continue;
+			if (msg.key.fromMe) continue;
+			const chatId = msg.key.remoteJid;
+			if (!chatId || chatId === "status@broadcast") continue;
+
+			const body = getMessageText(msg.message);
+			if (!body) continue;
+
+			const normalizedMsg = {
+				body,
+				from: chatId,
+				reply: (text) => sendText(sock, chatId, text, msg),
+			};
+
+			await handleCommands(sock, normalizedMsg);
+		}
+	});
+}
+
+startSock().catch((err) => {
+	console.error("❌ Gagal memulai Baileys:", err.message);
+});

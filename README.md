@@ -173,6 +173,7 @@ Output akan menampilkan daftar prefix down dan up yang tersedia.
 - Perintah umum tersedia untuk target atau admin; perintah admin hanya untuk `ADMIN_CHAT_IDS` di `index.js`.
 
 ### Perintah Umum
+- `/register <nomor>` — Daftarkan device linked (LID) agar bisa memakai command (contoh: `/register 6285137387227`).
 - `/salam` — Tampilkan status router terkini (laporan singkat).
 - `/detail <down|up> <prefix>` — Tampilkan daftar lengkap user yang down/online dari notifikasi Link XXX terakhir. 
   - Contoh: `/detail down BRN` untuk melihat user yang down
@@ -249,15 +250,16 @@ Baileys menggunakan format JID `@s.whatsapp.net`, sedangkan konfigurasi memakai 
 **Cara Kerja:**
 1. **Normalisasi ID**: `@c.us` otomatis diubah ke `@s.whatsapp.net` saat kirim/cek akses.
 2. **Cache mapping saat kirim pesan**: Bot menyimpan mapping ID hasil normalisasi ke ID asli di `targets.json`.
-3. **Three-tier authentication** untuk command:
+3. **Manual mapping untuk LID**: User yang terdaftar bisa jalankan `/register <nomor>` untuk menghubungkan device `@lid` ke target `@c.us`.
+4. **Three-tier authentication** untuk command:
   - ✅ Direct ID match (cek langsung dengan ID di targets/admin setelah normalisasi)
   - ✅ Cache lookup (cek mapping ID normalisasi)
   - ✅ Number extraction fallback (bandingkan nomor telepon)
-4. **Cache cleanup otomatis**: Saat target dihapus dengan `/targets remove`, mapping terkait ikut dihapus.
+5. **Cache cleanup otomatis**: Saat target dihapus dengan `/targets remove`, mapping terkait ikut dihapus.
 
 **Keuntungan:**
 - Target tetap bisa memakai `@c.us` seperti sebelumnya
-- Autentikasi tetap stabil meski format JID berbeda
+- Device `@lid` bisa dihubungkan tanpa mengganti format `targets.json`
 - Security tetap terjaga karena hanya ID di `targets.json` yang diizinkan
 
 **Debug Command:**

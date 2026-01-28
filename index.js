@@ -93,6 +93,11 @@ function extractPhoneNumber(chatId) {
 	return match ? match[1] : chatId;
 }
 
+function normalizePhoneNumber(value) {
+	const digits = String(value || "").replace(/\D/g, "");
+	return digits.replace(/^(62|0)/, "");
+}
+
 function normalizeChatId(chatId) {
 	if (!chatId) return chatId;
 	if (chatId.endsWith("@c.us")) return chatId.replace("@c.us", "@s.whatsapp.net");
@@ -635,9 +640,10 @@ async function runScheduledReport(client, timeLabel) {
 function buildCmdMessage(includeAdmin) {
 	const umum =
 		"*Perintah Umum:*\n\n" +
-		"1. `/salam` - Menampilkan status router saat ini. Perintah ini membantu memantau kondisi router dan memastikan semuanya berjalan baik.\n" +
-		"2. `/detail <down|up> <prefix>` - Menampilkan daftar user yang down/online dari notifikasi Link XXX terakhir (contoh: `/detail down BRN` atau `/detail up PGK`).\n" +
-		"3. `/cmd` - Menampilkan bantuan ini agar Anda memahami cara memakai perintah lain dan memecahkan masalah umum.";
+		"1. `/register <nomor>` - Daftarkan device linked (LID) agar bisa memakai command.\n" +
+		"2. `/salam` - Menampilkan status router saat ini. Perintah ini membantu memantau kondisi router dan memastikan semuanya berjalan baik.\n" +
+		"3. `/detail <down|up> <prefix>` - Menampilkan daftar user yang down/online dari notifikasi Link XXX terakhir (contoh: `/detail down BRN` atau `/detail up PGK`).\n" +
+		"4. `/cmd` - Menampilkan bantuan ini agar Anda memahami cara memakai perintah lain dan memecahkan masalah umum.";
 
 	if (!includeAdmin) {
 		return umum;
@@ -725,6 +731,44 @@ async function handleCommands(client, msg) {
 	// Log semua command yang masuk
 	console.log(`\n📥 Command masuk: "${body}" dari ${chatId}`);
 	console.log(`   Admin: ${isAdminContext}, Target: ${isTargetContext}`);
+
+	if (lower.startsWith("/register")) {
+		const parts = body.split(/\s+/);
+		const inputNumber = normalizePhoneNumber(parts[1]);
+
+		if (!inputNumber) {
+			await msg.reply(
+				"Format: /register <nomor>\n\n" +
+				"Contoh:\n/register 6285137387227"
+			);
+			return true;
+		}
+
+		const normalizedChatId = normalizeChatId(chatId);
+		const matchedTarget = targets.ids.find((t) => {
+			const targetNumber = normalizePhoneNumber(
+				extractPhoneNumber(normalizeChatId(t.id))
+			);
+			return targetNumber === inputNumber;
+		});
+
+		if (!matchedTarget) {
+			await msg.reply(
+				"❌ Nomor belum terdaftar sebagai target.\n" +
+				"Hubungi admin untuk menambahkan nomor Anda terlebih dahulu."
+			);
+			return true;
+		}
+
+		deviceToTargetCache.set(normalizedChatId, matchedTarget.id);
+		await msg.reply(
+			"✅ Device berhasil didaftarkan.\n\n" +
+			`Device: ${chatId}\n` +
+			`Target: ${matchedTarget.id}`
+		);
+		console.log(`✅ Manual mapping: ${normalizedChatId} → ${matchedTarget.id}`);
+		return true;
+	}
 
 	// DEBUG: Command untuk cek ID dan akses
 	if (lower === "/debug") {

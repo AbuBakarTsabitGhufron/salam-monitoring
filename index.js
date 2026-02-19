@@ -25,6 +25,9 @@ const DEFAULT_SCHEDULES = ["07:00", "15:00"]; // WIB, mudah diubah lewat /jadwal
 const DEFAULT_THRESHOLD = { minMinutes: 15, maxMinutes: 300 };
 const DEFAULT_TARGETS = [{ id: "120363406015508176@g.us", type: "all" }]; // Contoh grup WA
 const ADMIN_CHAT_IDS = ["6287715308060@c.us"]; // Isi dengan chat (grup/nomor) yang boleh pakai perintah admin
+const ADMIN_LID_MAP = {
+	"186771082064010@lid": "6287715308060@c.us",
+};
 const GROUPING_THRESHOLD = 10; // Minimum jumlah user dengan prefix sama untuk di-grup
 const SESSION_NAME = "salam-monitoring-bot"; // Nama folder session Baileys
 const AUTH_DIR = path.join(__dirname, `${SESSION_NAME}_auth`); // Folder auth Baileys
@@ -640,10 +643,11 @@ async function runScheduledReport(client, timeLabel) {
 function buildCmdMessage(includeAdmin) {
 	const umum =
 		"*Perintah Umum:*\n\n" +
-		"1. `/register <nomor>` - Daftarkan device linked (LID) agar bisa memakai command.\n" +
+		"1. `/reg <nomor>` - Daftarkan device linked (LID) agar bisa memakai command.\n" +
 		"2. `/salam` - Menampilkan status router saat ini. Perintah ini membantu memantau kondisi router dan memastikan semuanya berjalan baik.\n" +
 		"3. `/detail <down|up> <prefix>` - Menampilkan daftar user yang down/online dari notifikasi Link XXX terakhir (contoh: `/detail down BRN` atau `/detail up PGK`).\n" +
-		"4. `/cmd` - Menampilkan bantuan ini agar Anda memahami cara memakai perintah lain dan memecahkan masalah umum.";
+		"4. `/ping` - Cek akses bot (balasan PONG).\n" +
+		"5. `/cmd` - Menampilkan bantuan ini agar Anda memahami cara memakai perintah lain dan memecahkan masalah umum.";
 
 	if (!includeAdmin) {
 		return umum;
@@ -671,6 +675,8 @@ function isAdminChat(chatId) {
 	
 	// 1. Cek langsung dengan ID asli
 	const normalizedChatId = normalizeChatId(chatId);
+	const mappedAdminId = ADMIN_LID_MAP[chatId];
+	if (mappedAdminId) return true;
 	const directMatch = ADMIN_CHAT_IDS.some((id) => normalizeChatId(id) === normalizedChatId);
 	if (directMatch) return true;
 	
@@ -685,7 +691,11 @@ function isAdminChat(chatId) {
 function isTargetChat(chatId) {
 	// 1. Cek langsung dengan ID asli
 	const normalizedChatId = normalizeChatId(chatId);
-	const directMatch = targets.ids.some(t => normalizeChatId(t.id) === normalizedChatId);
+	const directMatch = targets.ids.some(t => {
+		const lidMatch = t.lid ? normalizeChatId(t.lid) === normalizedChatId : false;
+		if (lidMatch) return true;
+		return normalizeChatId(t.id) === normalizedChatId;
+	});
 	if (directMatch) {
 		console.log(`✅ isTargetChat(${chatId}): true (direct match)`);
 		return true;
@@ -732,14 +742,14 @@ async function handleCommands(client, msg) {
 	console.log(`\n📥 Command masuk: "${body}" dari ${chatId}`);
 	console.log(`   Admin: ${isAdminContext}, Target: ${isTargetContext}`);
 
-	if (lower.startsWith("/register")) {
+	if (lower.startsWith("/reg")) {
 		const parts = body.split(/\s+/);
 		const inputNumber = normalizePhoneNumber(parts[1]);
 
 		if (!inputNumber) {
 			await msg.reply(
-				"Format: /register <nomor>\n\n" +
-				"Contoh:\n/register 6285137387227"
+				"Format: /reg <nomor>\n\n" +
+				"Contoh:\n/reg 6285137387227"
 			);
 			return true;
 		}
@@ -760,6 +770,8 @@ async function handleCommands(client, msg) {
 			return true;
 		}
 
+		matchedTarget.lid = chatId;
+		saveJson(TARGETS_FILE, targets);
 		deviceToTargetCache.set(normalizedChatId, matchedTarget.id);
 		await msg.reply(
 			"✅ Device berhasil didaftarkan.\n\n" +
@@ -793,6 +805,18 @@ async function handleCommands(client, msg) {
 		}
 
 		await msg.reply(buildCmdMessage(isAdminContext));
+		return true;
+	}
+
+	if (lower === "/ping") {
+		console.log(`📝 Command /ping dari ${chatId} - Admin: ${isAdminContext}, Target: ${isTargetContext}`);
+
+		if (!isAdminContext && !isTargetContext) {
+			console.log(`❌ Akses ditolak untuk ${chatId}`);
+			return true;
+		}
+
+		await msg.reply("PONG ✅");
 		return true;
 	}
 
@@ -1124,7 +1148,11 @@ async function startSock() {
 			const normalizedMsg = {
 				body,
 				from: chatId,
-				reply: (text) => sendText(sock, chatId, text, msg),
+				reply: (text) => {
+					const adminReplyId = ADMIN_LID_MAP[chatId];
+					const replyTarget = adminReplyId || chatId;
+					return sendText(sock, replyTarget, text, msg);
+				},
 			};
 
 			await handleCommands(sock, normalizedMsg);

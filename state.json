@@ -1,17 +1,23 @@
 {
   "notified": {
     "SALAM-UTAMA-INDI": {
-      "PGK-Supanggih": "2026-01-18T12:08:40.247Z"
+      "BRN-Dwi Yanti": "2026-02-18T23:14:39.179Z",
+      "BRN-Eka Marwanta": "2026-02-18T23:14:39.179Z",
+      "BRN-Gunawan": "2026-02-18T23:14:39.179Z",
+      "BRN-Istiningsih": "2026-02-18T23:14:39.179Z",
+      "BRN-Wagiyem": "2026-02-18T23:14:39.179Z",
+      "Event": "2026-02-19T00:23:39.330Z"
     }
   },
   "lastReports": {
     "13:22": "2025-12-11T06:22:01.068Z",
     "10:11": "2025-12-12T03:11:01.355Z",
-    "10:38": "2025-12-12T03:38:02.675Z"
+    "10:38": "2025-12-12T03:38:02.675Z",
+    "07:00": "2026-02-19T00:00:02.444Z"
   },
   "threshold": {
-    "minMinutes": 13,
-    "maxMinutes": 300
+    "minMinutes": 7,
+    "maxMinutes": 100
   },
   "scheduleTimes": [
     "07:00",

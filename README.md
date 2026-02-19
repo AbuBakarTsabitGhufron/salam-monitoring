@@ -173,7 +173,7 @@ Output akan menampilkan daftar prefix down dan up yang tersedia.
 - Perintah umum tersedia untuk target atau admin; perintah admin hanya untuk `ADMIN_CHAT_IDS` di `index.js`.
 
 ### Perintah Umum
-- `/register <nomor>` — Daftarkan device linked (LID) agar bisa memakai command (contoh: `/register 6285137387227`).
+- `/reg <nomor>` — Daftarkan device linked (LID) agar bisa memakai command (contoh: `/reg 6285137387227`).
 - `/salam` — Tampilkan status router terkini (laporan singkat).
 - `/detail <down|up> <prefix>` — Tampilkan daftar lengkap user yang down/online dari notifikasi Link XXX terakhir. 
   - Contoh: `/detail down BRN` untuk melihat user yang down
@@ -181,6 +181,7 @@ Output akan menampilkan daftar prefix down dan up yang tersedia.
   - Tanpa parameter untuk melihat daftar prefix yang tersedia
 - `/cmd` — Tampilkan bantuan.
 - `/debug` — Tampilkan Chat ID, status admin/target, dan device mapping (untuk debugging autentikasi).
+- `/ping` — Cek akses bot (balasan PONG).
 
 ### Perintah Admin
 - `/targets <add|remove|list> [id] [all|link]` — Kelola daftar penerima pesan dengan kategori:
@@ -222,6 +223,30 @@ Bot mendukung kategorisasi target untuk memfilter jenis notifikasi yang diterima
 /targets list
 ```
 
+### Format `targets.json` (dengan LID)
+```json
+{
+  "ids": [
+    {
+      "id": "6285137387227@c.us",
+      "lid": "264905596895258@lid",
+      "type": "all"
+    },
+    {
+      "id": "6287715308060@c.us",
+      "type": "all"
+    }
+  ]
+}
+```
+
+### Alur LID (linked device)
+1. Admin menambahkan nomor utama ke target:
+   - `/targets add 6285137387227@c.us all`
+2. User (device `@lid`) mendaftarkan LID:
+   - `/reg 6285137387227`
+3. Bot menyimpan `lid` ke `targets.json` dan user bisa akses `/salam`, `/cmd`, `/detail`, `/ping`.
+
 ## Struktur Repo
 - `index.js` — Logika utama bot, scheduler, handler perintah, notifikasi down/online, dan grouping.
 - `package.json` — Dependensi: `@whiskeysockets/baileys`, `axios`, `node-cron`, `qrcode-terminal`, `pino`.
@@ -250,7 +275,7 @@ Baileys menggunakan format JID `@s.whatsapp.net`, sedangkan konfigurasi memakai 
 **Cara Kerja:**
 1. **Normalisasi ID**: `@c.us` otomatis diubah ke `@s.whatsapp.net` saat kirim/cek akses.
 2. **Cache mapping saat kirim pesan**: Bot menyimpan mapping ID hasil normalisasi ke ID asli di `targets.json`.
-3. **Manual mapping untuk LID**: User yang terdaftar bisa jalankan `/register <nomor>` untuk menghubungkan device `@lid` ke target `@c.us`.
+3. **Manual mapping untuk LID**: User yang terdaftar bisa jalankan `/reg <nomor>` untuk menghubungkan device `@lid` ke target `@c.us`.
 4. **Three-tier authentication** untuk command:
   - ✅ Direct ID match (cek langsung dengan ID di targets/admin setelah normalisasi)
   - ✅ Cache lookup (cek mapping ID normalisasi)

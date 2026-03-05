@@ -408,7 +408,7 @@ async function checkAlerts(client) {
 		const activeKeys = new Set();
 		const newAlerts = [];
 
-		// Kumpulkan alert baru dengan pengecekan ketat
+		// Kumpulkan alert baru
 		for (const user of offlineUsers) {
 			if (!ROUTERS.includes(user.router)) continue;
 			if (isBlacklisted(user.user)) continue;
@@ -420,13 +420,8 @@ async function checkAlerts(client) {
 			const key = normalizeKey(user.router, user.user);
 			activeKeys.add(key);
 
-			// ⭐ PENGECEKAN KETAT: Cek apakah sudah ada di state.notified
 			const already = state.notified[user.router]?.[user.user];
-			if (already) {
-				// Sudah pernah dikirim notifikasi untuk user ini, skip
-				console.log(`⏭️  Skip ${user.user} (router: ${user.router}) - sudah ada di state.json sejak ${already}`);
-				continue;
-			}
+			if (already && already === user.offlineSince) continue;
 
 			newAlerts.push(user);
 		}
@@ -480,17 +475,14 @@ async function checkAlerts(client) {
 			messages.push({ type: 'individual', message, user });
 		}
 
-		// 3. Kirim semua message dengan state persistence yang kuat
+		// 3. Kirim semua message
 		for (const item of messages) {
-			// ⭐ SIMPAN KE STATE.JSON DULU sebelum kirim notifikasi
-			// Ini mencegah notifikasi duplikat jika bot restart atau error saat kirim
+			// Tentukan tipe notifikasi untuk routing
+			const notificationType = item.type === 'grouped' ? 'grouped' : 'individual';
+			await sendToTargets(client, item.message, notificationType);
+			
+			// Update state
 			if (item.type === 'grouped') {
-				// Simpan semua user di grup ke state dulu
-				for (const user of item.users) {
-					upsertNotified(user.router, user.user, user.offlineSince);
-					console.log(`💾 Tersimpan di state.json: ${user.user} (${user.router}) - ${user.offlineSince}`);
-				}
-				
 				// Simpan untuk command /detail
 				const prefix = item.users[0] ? extractPrefix(item.users[0].user) : null;
 				if (prefix) {
@@ -500,24 +492,12 @@ async function checkAlerts(client) {
 						offlineSince: u.offlineSince
 					}));
 				}
-			} else {
-				// Simpan user individual ke state dulu
-				upsertNotified(item.user.router, item.user.user, item.user.offlineSince);
-				console.log(`💾 Tersimpan di state.json: ${item.user.user} (${item.user.router}) - ${item.user.offlineSince}`);
-			}
-			
-			// Baru kirim notifikasi setelah tersimpan
-			const notificationType = item.type === 'grouped' ? 'grouped' : 'individual';
-			try {
-				await sendToTargets(client, item.message, notificationType);
-				if (item.type === 'grouped') {
-					console.log(`📤 Notifikasi grouped terkirim: ${item.users.length} user dengan prefix ${extractPrefix(item.users[0].user)}`);
-				} else {
-					console.log(`📤 Notifikasi terkirim: ${item.user.user}`);
+				
+				for (const user of item.users) {
+					upsertNotified(user.router, user.user, user.offlineSince);
 				}
-			} catch (err) {
-				console.error(`❌ Gagal kirim notifikasi tapi sudah tersimpan di state.json:`, err.message);
-				// State sudah tersimpan, jadi tidak akan kirim ulang di cycle berikutnya
+			} else {
+				upsertNotified(item.user.router, item.user.user, item.user.offlineSince);
 			}
 		}
 
@@ -525,18 +505,7 @@ async function checkAlerts(client) {
 		await checkLinkRecovery(client, activeKeys);
 		
 		removeClearedNotified(activeKeys);
-		
-		// ⭐ VERIFIKASI: Log total user di state.json
-		const totalNotified = Object.keys(state.notified).reduce((sum, router) => {
-			return sum + Object.keys(state.notified[router] || {}).length;
-		}, 0);
-		console.log(`✅ Pengecekan alert selesai. Total user di state.json: ${totalNotified}`);
-		console.log(`📊 Detail per router:`);
-		for (const router of Object.keys(state.notified)) {
-			const users = Object.keys(state.notified[router]);
-			console.log(`   - ${toDisplayRouterName(router)}: ${users.length} user (${users.join(', ')})`);
-		}
-		console.log();
+		console.log("✅ Pengecekan alert selesai\n");
 	} catch (err) {
 		console.error("Gagal cek alert:", err.message);
 	}
